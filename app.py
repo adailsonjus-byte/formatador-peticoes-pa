@@ -96,9 +96,9 @@ async def home(req:Request):
         if not history: history='<li>Nenhum documento salvo.</li>'
         admin=''
         if role=='admin':
-            profiles=(await supa(req,'GET','/rest/v1/profiles',params={'select':'full_name,role,created_at','order':'created_at.desc','limit':'100'})).json()
-            people=''.join(f'<li>{html.escape(x.get("full_name") or "Sem nome")} — {html.escape(x.get("role") or "")}</li>' for x in profiles)
-            admin=f'<section><h3>Painel administrativo (consulta)</h3><p>Perfis cadastrados: {len(profiles)}</p><ul>{people}</ul><small>Convites e alterações de permissões ainda são feitos no Supabase.</small></section>'
+            profiles=(await supa(req,'GET','/rest/v1/profiles',params={'select':'id,full_name,role,created_at','order':'created_at.desc','limit':'100'})).json()
+            people=''.join(f'<li>{html.escape(x.get("full_name") or "Sem nome")} — {html.escape(x.get("role") or "")}<br><small>UID: {html.escape(x["id"])}</small></li>' for x in profiles)
+            admin=f'''<section><h3>Administração de colaboradores</h3><p>Perfis cadastrados: {len(profiles)}</p><ul>{people}</ul><h4>Adicionar ou atualizar perfil</h4><p><small>Primeiro crie o usuário em Supabase → Authentication → Users → Add user. Copie o UID do usuário criado e preencha abaixo. Este formulário não cria contas de login.</small></p><form action="/admin/perfil" method="post"><input type="hidden" name="csrf" value="CSRF_VALUE"><label>UID do usuário no Supabase</label><input name="uid" required placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"><label>Nome completo</label><input name="full_name" maxlength="120" required><label>Permissão</label><select name="role" style="width:100%;padding:12px;margin:8px 0 16px"><option value="collaborator">Colaborador</option><option value="admin">Administrador</option></select><button>Salvar perfil</button></form><small>Somente administradores podem salvar perfis. Não é possível remover sua própria permissão de administrador por este formulário.</small></section>'''
         notice='<p class="alert">Versão de homologação: use somente textos fictícios. Documentos gerados serão salvos em armazenamento privado e poderão ser excluídos do histórico.</p>'
     except HTTPException:
         # Falha de integração não deve permitir acesso privilegiado nem salvar documentos silenciosamente.
@@ -189,4 +189,22 @@ async def excluir(req:Request,doc_id:uuid.UUID,csrf:str=Form(...)):
     doc=await document_row(req,str(doc_id),user['id'])
     await supa(req,'DELETE','/storage/v1/object/peticoes/'+doc['storage_path'])
     await supa(req,'DELETE','/rest/v1/documents',params={'id':'eq.'+str(doc_id),'user_id':'eq.'+user['id']})
+    return RedirectResponse('/',status_code=303)
+
+
+@app.post('/admin/perfil')
+async def admin_perfil(req:Request,csrf:str=Form(...),uid:str=Form(...),full_name:str=Form(...),role:str=Form(...)):
+    check_csrf(req,csrf)
+    user=await identity(req)
+    if not user: raise HTTPException(401,'Faça login novamente')
+    if await role_of(req,user['id']) != 'admin': raise HTTPException(403,'Acesso restrito a administradores')
+    try: target=str(uuid.UUID(uid))
+    except ValueError: raise HTTPException(400,'UID inválido')
+    full_name=full_name.strip()
+    if not (1<=len(full_name)<=120) or role not in ('admin','collaborator'):
+        raise HTTPException(400,'Dados de perfil inválidos')
+    if target==user['id'] and role!='admin':
+        raise HTTPException(400,'Não é permitido retirar sua própria permissão administrativa')
+    # The foreign key rejects UIDs that do not exist in auth.users.
+    await supa(req,'POST','/rest/v1/profiles',json={'id':target,'full_name':full_name,'role':role},headers={'Content-Type':'application/json','Prefer':'resolution=merge-duplicates,return=minimal'})
     return RedirectResponse('/',status_code=303)
