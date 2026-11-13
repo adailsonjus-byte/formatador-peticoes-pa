@@ -1,4 +1,4 @@
-import os, secrets, html, time
+import os, secrets, html, time, uuid
 from pathlib import Path
 from io import BytesIO
 import httpx
@@ -48,6 +48,37 @@ async def identity(req):
         return r.json()
     except httpx.HTTPError: return None
 
+def auth_headers(req):
+    sid=req.session.get('sid'); entry=SESSIONS.get(sid)
+    if not entry or entry['expires'] < time.time(): raise HTTPException(401,'Sessão expirada')
+    return {'apikey':KEY,'Authorization':'Bearer '+entry['token']}
+
+async def supa(req,method,path,**kwargs):
+    async with httpx.AsyncClient(timeout=25) as client:
+        try:
+            r=await client.request(method,URL+path,headers={**auth_headers(req),**kwargs.pop('headers',{})},**kwargs)
+        except httpx.HTTPError:
+            raise HTTPException(503,'Serviço temporariamente indisponível')
+    if r.status_code >= 400:
+        # Nunca expor detalhes internos, credenciais ou dados pessoais do serviço.
+        raise HTTPException(502,'Não foi possível concluir a operação no Supabase')
+    return r
+
+async def role_of(req,user_id):
+    r=await supa(req,'GET','/rest/v1/profiles',params={'id':'eq.'+user_id,'select':'role'})
+    rows=r.json()
+    return rows[0].get('role','collaborator') if rows else 'collaborator'
+
+async def documents_for(req,user_id):
+    r=await supa(req,'GET','/rest/v1/documents',params={'user_id':'eq.'+user_id,'select':'id,output_filename,created_at','order':'created_at.desc','limit':'30'})
+    return r.json()
+
+async def document_row(req,doc_id,user_id):
+    r=await supa(req,'GET','/rest/v1/documents',params={'id':'eq.'+doc_id,'user_id':'eq.'+user_id,'select':'id,storage_path,output_filename'})
+    rows=r.json()
+    if not rows: raise HTTPException(404,'Documento não encontrado')
+    return rows[0]
+
 @app.get('/health')
 def health(): return {'status':'ok'}
 
@@ -57,7 +88,22 @@ async def home(req:Request):
     if not user:
         return page(req,'''<section><h2>Entrar</h2><form method="post" action="/login"><input type="hidden" name="csrf" value="CSRF_VALUE"><label>E-mail</label><input type="email" name="email" required autocomplete="username"><label>Senha</label><input type="password" name="password" required autocomplete="current-password"><button>Entrar</button></form><small>Acesso somente para usuários cadastrados no escritório.</small></section>''')
     email=html.escape(user.get('email',''))
-    return page(req,f'''<section><h2>Formatar petição</h2><p>Conectado: {email}</p><p class="alert">Versão de homologação: use somente textos fictícios, sem dados pessoais de clientes. Arquivos não são salvos no histórico.</p><form action="/formatar" method="post" enctype="multipart/form-data"><input type="hidden" name="csrf" value="CSRF_VALUE"><label>Opção A — Enviar Word (.docx)</label><input type="file" name="arquivo" accept=".docx"><p>OU</p><label>Opção B — Colar texto</label><textarea name="texto" rows="11" placeholder="Cole aqui a petição..."></textarea><small>Escolha apenas uma opção. Texto colado não preserva negritos, tabelas ou estilos originais.</small><button>Gerar documento Word</button></form><form method="post" action="/sair"><input type="hidden" name="csrf" value="CSRF_VALUE"><button>Sair</button></form></section>''')
+    uid=user['id']
+    try:
+        role=await role_of(req,uid)
+        docs=await documents_for(req,uid)
+        history=''.join(f'<li>{html.escape(str(d.get("created_at", ""))[:16])} · {html.escape(d.get("output_filename") or "peticao_formatada.docx")} · <a href="/documentos/{html.escape(d["id"])}">Baixar</a> <form style="display:inline" method="post" action="/documentos/{html.escape(d["id"])}/excluir"><input type="hidden" name="csrf" value="CSRF_VALUE"><button style="width:auto;padding:5px">Excluir</button></form></li>' for d in docs)
+        if not history: history='<li>Nenhum documento salvo.</li>'
+        admin=''
+        if role=='admin':
+            profiles=(await supa(req,'GET','/rest/v1/profiles',params={'select':'full_name,role,created_at','order':'created_at.desc','limit':'100'})).json()
+            people=''.join(f'<li>{html.escape(x.get("full_name") or "Sem nome")} — {html.escape(x.get("role") or "")}</li>' for x in profiles)
+            admin=f'<section><h3>Painel administrativo (consulta)</h3><p>Perfis cadastrados: {len(profiles)}</p><ul>{people}</ul><small>Convites e alterações de permissões ainda são feitos no Supabase.</small></section>'
+        notice='<p class="alert">Versão de homologação: use somente textos fictícios. Documentos gerados serão salvos em armazenamento privado e poderão ser excluídos do histórico.</p>'
+    except HTTPException:
+        # Falha de integração não deve permitir acesso privilegiado nem salvar documentos silenciosamente.
+        return page(req,'<section><h2>Configuração incompleta</h2><p>Não foi possível consultar os perfis ou o histórico no Supabase. Verifique as tabelas e políticas configuradas.</p><form method="post" action="/sair"><input type="hidden" name="csrf" value="CSRF_VALUE"><button>Sair</button></form></section>')
+    return page(req,f"""<section><h2>Formatar petição</h2><p>Conectado: {email} · {"Administrador" if role=="admin" else "Colaborador"}</p>{notice}<form action="/formatar" method="post" enctype="multipart/form-data"><input type="hidden" name="csrf" value="CSRF_VALUE"><label>Opção A — Enviar Word (.docx)</label><input type="file" name="arquivo" accept=".docx"><p>OU</p><label>Opção B — Colar texto</label><textarea name="texto" rows="11" placeholder="Cole aqui a petição..."></textarea><small>Escolha apenas uma opção. Texto colado não preserva negritos, tabelas ou estilos originais.</small><button>Gerar documento Word</button></form><h3>Meus documentos (últimos 30)</h3><ul>{history}</ul><form method="post" action="/sair"><input type="hidden" name="csrf" value="CSRF_VALUE"><button>Sair</button></form></section>{admin}""")
 
 @app.post('/login')
 async def login(req:Request,email:str=Form(...),password:str=Form(...),csrf:str=Form(...)):
@@ -114,4 +160,33 @@ async def formatar(req:Request,csrf:str=Form(...),texto:str=Form(''),arquivo:Upl
         output=format_docx(source,LETTERHEAD)
     except HTTPException: raise
     except Exception: raise HTTPException(422,'Não foi possível formatar este documento. Verifique o arquivo.')
+    user=await identity(req)
+    uid=user['id']; doc_id=str(uuid.uuid4())
+    path=f'{uid}/{doc_id}.docx'
+    # O arquivo original não é armazenado; somente a saída formatada.
+    await supa(req,'POST','/storage/v1/object/peticoes/'+path,data=output,headers={'Content-Type':'application/vnd.openxmlformats-officedocument.wordprocessingml.document','x-upsert':'false'})
+    try:
+        await supa(req,'POST','/rest/v1/documents',json={'id':doc_id,'user_id':uid,'original_filename':arquivo.filename if has_file else None,'output_filename':'peticao_formatada.docx','storage_path':path},headers={'Content-Type':'application/json','Prefer':'return=minimal'})
+    except HTTPException:
+        try: await supa(req,'DELETE','/storage/v1/object/peticoes/'+path)
+        except HTTPException: pass
+        raise
     return StreamingResponse(BytesIO(output),media_type='application/vnd.openxmlformats-officedocument.wordprocessingml.document',headers={'Content-Disposition':'attachment; filename="peticao_formatada.docx"','Cache-Control':'no-store'})
+
+@app.get('/documentos/{doc_id}')
+async def baixar(req:Request,doc_id:uuid.UUID):
+    user=await identity(req)
+    if not user: raise HTTPException(401,'Faça login novamente')
+    doc=await document_row(req,str(doc_id),user['id'])
+    r=await supa(req,'GET','/storage/v1/object/authenticated/peticoes/'+doc['storage_path'])
+    return StreamingResponse(BytesIO(r.content),media_type='application/vnd.openxmlformats-officedocument.wordprocessingml.document',headers={'Content-Disposition':'attachment; filename="peticao_formatada.docx"','Cache-Control':'no-store'})
+
+@app.post('/documentos/{doc_id}/excluir')
+async def excluir(req:Request,doc_id:uuid.UUID,csrf:str=Form(...)):
+    check_csrf(req,csrf)
+    user=await identity(req)
+    if not user: raise HTTPException(401,'Faça login novamente')
+    doc=await document_row(req,str(doc_id),user['id'])
+    await supa(req,'DELETE','/storage/v1/object/peticoes/'+doc['storage_path'])
+    await supa(req,'DELETE','/rest/v1/documents',params={'id':'eq.'+str(doc_id),'user_id':'eq.'+user['id']})
+    return RedirectResponse('/',status_code=303)
