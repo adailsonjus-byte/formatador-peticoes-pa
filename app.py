@@ -68,7 +68,23 @@ async def login(req:Request,email:str=Form(...),password:str=Form(...),csrf:str=
     except httpx.HTTPError:
         return page(req,'<section><p>Serviço temporariamente indisponível. Tente novamente.</p><a href="/">Voltar</a></section>')
     if r.status_code!=200:
-        return page(req,'<section><p>E-mail ou senha inválidos.</p><a href="/">Voltar</a></section>')
+        # Exibe somente um código diagnóstico seguro; nunca imprime senhas, tokens ou chaves.
+        try:
+            error_data = r.json()
+            error_code = str(error_data.get('error_code') or error_data.get('code') or error_data.get('error') or 'unknown')
+        except (ValueError, AttributeError):
+            error_code = 'invalid_response'
+        known = {
+            'invalid_credentials': 'O Supabase recusou o e-mail ou a senha. Redefina a senha em Authentication > Users e tente novamente.',
+            'email_not_confirmed': 'O Supabase informa que o e-mail ainda não está confirmado.',
+            'invalid_api_key': 'A chave pública do Supabase está incorreta ou não pertence a este projeto.',
+            'signup_disabled': 'O provedor de autenticação não permitiu esta operação.',
+            'user_banned': 'Este usuário está bloqueado no Supabase.',
+            'over_request_rate_limit': 'Limite temporário de tentativas atingido. Aguarde antes de tentar novamente.',
+        }
+        message = known.get(error_code, 'O Supabase recusou a autenticação. Confira o código de diagnóstico abaixo.')
+        safe_code = html.escape(error_code[:70])
+        return page(req, f'<section><h2>Não foi possível entrar</h2><p>{html.escape(message)}</p><p><small>Diagnóstico: HTTP {r.status_code} / {safe_code}</small></p><a href="/">Voltar</a></section>')
     data=r.json(); sid=secrets.token_urlsafe(32)
     SESSIONS[sid]={'token':data['access_token'],'expires':time.time()+min(int(data.get('expires_in',3600)),3500)}
     req.session.clear();req.session['sid']=sid
