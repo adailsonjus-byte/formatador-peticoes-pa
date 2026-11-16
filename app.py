@@ -198,6 +198,8 @@ async def formatar(req:Request,csrf:str=Form(...),texto:str=Form(''),arquivo:Upl
         source=pasted_text_to_docx(texto)
     try:
         risks=inspect_risks(source)
+        # Permitir listas e numeracoes complexas; o usuario revisara a formatacao.
+        risks=[risk for risk in risks if 'numeração/listas complexas' not in risk]
         if risks: raise HTTPException(422,'Documento complexo não suportado: '+', '.join(risks[:5]))
         output=format_docx(source,await template_bytes())
     except HTTPException: raise
@@ -219,3 +221,4 @@ async def update_template(req:Request,csrf:str=Form(...),arquivo:UploadFile=File
     await request_api('POST','/storage/v1/object/peticoes/'+path,admin=True,data=content,headers={'Content-Type':MIME,'x-upsert':'false'},expected=(200,201))
     await request_api('POST','/rest/v1/app_settings',admin=True,json={'id':1,'template_path':path},headers={'Prefer':'resolution=merge-duplicates,return=minimal'},expected=(201,))
     return RedirectResponse('/admin',status_code=303)
+
