@@ -1,4 +1,3 @@
-
 """Formatador PA: backend de homologação com operações administrativas server-side.
 A chave secreta nunca é enviada ao navegador. Ver README para limites de segurança.
 """
@@ -113,7 +112,7 @@ def public_limit(req):
     hits.append(now)
     PUBLIC_HITS[ip] = hits
 
-PUBLIC_FORM = '''<section><h2>Formatar petição</h2><p>Envie um arquivo Word (.docx) ou cole o texto. Não é necessário criar conta.</p><p class="warn">Serviço de acesso público. Use inicialmente apenas documentos fictícios: antes do uso com dados de clientes, valide segurança, privacidade e capacidade da hospedagem.</p><form method="post" action="/formatar" enctype="multipart/form-data"><input type="hidden" name="csrf" value="CSRF_VALUE"><label>A — Enviar Word (.docx)</label><input type="file" name="arquivo" accept=".docx"><p>OU</p><label>B — Colar texto</label><textarea name="texto" rows="12"></textarea><small>Escolha apenas uma opção. Texto simples não preserva estilos originais. O resultado é entregue por download, sem histórico público.</small><button>Gerar documento Word</button></form><small>Administrador: <a href="/admin">entrar para alterar papel timbrado</a>.</small></section>'''
+PUBLIC_FORM = '''<section><h2>Formatar petição</h2><p>Envie um arquivo Word (.docx) ou cole o texto. Não é necessário criar conta.</p><form method="post" action="/formatar" enctype="multipart/form-data"><input type="hidden" name="csrf" value="CSRF_VALUE"><label>A — Enviar Word (.docx)</label><input type="file" name="arquivo" accept=".docx"><p>OU</p><label>B — Colar texto</label><textarea name="texto" rows="12"></textarea><small>Escolha apenas uma opção. Texto simples não preserva estilos originais. O resultado é entregue por download, sem histórico público.</small><button>Gerar documento Word</button></form><small>Administrador: <a href="/admin">entrar para alterar papel timbrado</a>.</small></section>'''
 
 @app.get('/')
 async def home(req:Request):
