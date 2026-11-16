@@ -1,3 +1,4 @@
+
 """Formatador PA: backend de homologação com operações administrativas server-side.
 A chave secreta nunca é enviada ao navegador. Ver README para limites de segurança.
 """
@@ -98,21 +99,33 @@ def file_response(content, name='peticao_formatada.docx'):
 @app.get('/health')
 def health(): return {'status':'ok'}
 
+PUBLIC_HITS = {}
+
+def public_limit(req):
+    # Limite por IP da conexão, em memória; reinicia com o serviço.
+    ip = req.client.host if req.client else 'unknown'
+    now = time.monotonic()
+    if len(PUBLIC_HITS) > 5000:
+        PUBLIC_HITS.clear()
+    hits = [t for t in PUBLIC_HITS.get(ip, []) if now-t < 60]
+    if len(hits) >= 8:
+        raise HTTPException(429, 'Muitas solicitações. Aguarde um minuto e tente novamente.')
+    hits.append(now)
+    PUBLIC_HITS[ip] = hits
+
+PUBLIC_FORM = '''<section><h2>Formatar petição</h2><p>Envie um arquivo Word (.docx) ou cole o texto. Não é necessário criar conta.</p><p class="warn">Serviço de acesso público. Use inicialmente apenas documentos fictícios: antes do uso com dados de clientes, valide segurança, privacidade e capacidade da hospedagem.</p><form method="post" action="/formatar" enctype="multipart/form-data"><input type="hidden" name="csrf" value="CSRF_VALUE"><label>A — Enviar Word (.docx)</label><input type="file" name="arquivo" accept=".docx"><p>OU</p><label>B — Colar texto</label><textarea name="texto" rows="12"></textarea><small>Escolha apenas uma opção. Texto simples não preserva estilos originais. O resultado é entregue por download, sem histórico público.</small><button>Gerar documento Word</button></form><small>Administrador: <a href="/admin">entrar para alterar papel timbrado</a>.</small></section>'''
+
 @app.get('/')
 async def home(req:Request):
-    try: user,profile = await current(req)
+    return page(req, PUBLIC_FORM)
+
+@app.get('/admin')
+async def admin_home(req:Request):
+    try:
+        user = await require_admin(req)
     except HTTPException:
-        return page(req,'''<section><h2>Entrar</h2><form method="post" action="/login"><input type="hidden" name="csrf" value="CSRF_VALUE"><label>E-mail</label><input name="email" type="email" required autocomplete="username"><label>Senha</label><input name="password" type="password" required autocomplete="current-password"><button>Entrar</button></form><a href="/recuperar">Esqueci minha senha</a></section>''')
-    uid=user['id']
-    docs=await documents_for(uid)
-    rows=''.join(f'<li>{esc(d["created_at"][:16])} — {esc(d.get("output_filename") or "peticao_formatada.docx")} — <a href="/documentos/{esc(d["id"])}">Baixar</a> <form class="inline" method="post" action="/documentos/{esc(d["id"])}/excluir"><input type="hidden" name="csrf" value="CSRF_VALUE"><button>Excluir</button></form></li>' for d in docs) or '<li>Nenhum documento.</li>'
-    admin_html=''
-    if profile['role']=='admin':
-        r=await request_api('GET','/rest/v1/profiles',admin=True,params={'select':'id,full_name,role,active,created_at','order':'created_at.desc','limit':'200'})
-        people=''.join(f'<li>{esc(p.get("full_name") or "Sem nome")} — {esc(p["role"])} — {"Ativo" if p["active"] else "Desativado"} <small>({esc(p["id"])})</small><form method="post" action="/admin/status" class="inline"><input type="hidden" name="csrf" value="CSRF_VALUE"><input type="hidden" name="uid" value="{esc(p["id"])}"><input type="hidden" name="active" value="{str(not p["active"]).lower()}"><button>{"Desativar" if p["active"] else "Ativar"}</button></form><form method="post" action="/admin/senha" class="inline"><input type="hidden" name="csrf" value="CSRF_VALUE"><input type="hidden" name="uid" value="{esc(p["id"])}"><button>Senha temporária</button></form></li>' for p in r.json())
-        admin_html=f'''<section><h2>Administração de colaboradores</h2><h3>Contas</h3><ul>{people}</ul><h3>Criar usuário</h3><form method="post" action="/admin/criar"><input type="hidden" name="csrf" value="CSRF_VALUE"><label>Nome</label><input name="name" maxlength="120" required><label>E-mail</label><input name="email" type="email" required><label>Função</label><select name="role"><option value="collaborator">Colaborador</option><option value="admin">Administrador</option></select><button>Criar conta e gerar senha temporária</button></form><h3>Alterar papel timbrado</h3><form method="post" action="/admin/timbrado" enctype="multipart/form-data"><input type="hidden" name="csrf" value="CSRF_VALUE"><input type="file" name="arquivo" accept=".docx" required><button>Substituir modelo padrão</button></form><small>O novo modelo deve ser um .docx com cabeçalho, marca-d'água e rodapé. Não envie documentos de clientes como modelo.</small></section>'''
-    password_note='<p class="warn">Sua conta utiliza senha temporária. Altere-a abaixo antes de continuar.</p>' if profile['must_change_password'] else ''
-    return page(req,f'''<section><h2>Formatar petição</h2><p>{esc(user.get("email"))} — {"Administrador" if profile["role"]=="admin" else "Colaborador"}</p><p class="warn">Ambiente gratuito de testes. Não utilize documentos reais de clientes antes da validação independente de segurança e privacidade.</p>{password_note}<form method="post" action="/formatar" enctype="multipart/form-data"><input type="hidden" name="csrf" value="CSRF_VALUE"><label>A — Enviar Word (.docx)</label><input type="file" name="arquivo" accept=".docx"><p>OU</p><label>B — Colar texto</label><textarea name="texto" rows="9"></textarea><small>Escolha apenas uma opção. Texto simples não preserva estilos originais.</small><button>Gerar documento</button></form><h3>Meus documentos</h3><ul>{rows}</ul><h3>Alterar minha senha</h3><form method="post" action="/minha-senha"><input type="hidden" name="csrf" value="CSRF_VALUE"><label>Nova senha (mínimo 12 caracteres)</label><input name="password" type="password" minlength="12" required><button>Alterar senha</button></form><form method="post" action="/sair"><input type="hidden" name="csrf" value="CSRF_VALUE"><button>Sair</button></form></section>{admin_html}''')
+        return page(req, '''<section><h2>Acesso do administrador</h2><form method="post" action="/login"><input type="hidden" name="csrf" value="CSRF_VALUE"><label>E-mail</label><input name="email" type="email" required autocomplete="username"><label>Senha</label><input name="password" type="password" required autocomplete="current-password"><button>Entrar</button></form><a href="/recuperar">Esqueci minha senha</a></section>''')
+    return page(req, '''<section><h2>Administração do papel timbrado</h2><p>Administrador autenticado.</p><form method="post" action="/admin/timbrado" enctype="multipart/form-data"><input type="hidden" name="csrf" value="CSRF_VALUE"><label>Novo papel timbrado (.docx)</label><input type="file" name="arquivo" accept=".docx" required><button>Substituir papel timbrado</button></form><small>Use somente o modelo do escritório, com cabeçalho, marca-d'água e rodapé, sem dados de clientes.</small><form method="post" action="/sair"><input type="hidden" name="csrf" value="CSRF_VALUE"><button>Sair da administração</button></form></section>''')
 
 @app.post('/login')
 async def login(req:Request,csrf:str=Form(...),email:str=Form(...),password:str=Form(...)):
@@ -122,16 +135,16 @@ async def login(req:Request,csrf:str=Form(...),email:str=Form(...),password:str=
     data=r.json(); sid=secrets.token_urlsafe(32)
     SESSIONS[sid]={'token':data['access_token'],'expires':time.time()+min(int(data.get('expires_in',3600)),3500)}
     req.session.clear();req.session['sid']=sid
-    try: await current(req)
+    try: await require_admin(req)
     except HTTPException:
         SESSIONS.pop(sid,None);req.session.clear()
         return page(req,'<section><h2>Conta sem acesso</h2><p>Solicite ao administrador a ativação do perfil.</p></section>')
-    return RedirectResponse('/',status_code=303)
+    return RedirectResponse('/admin',status_code=303)
 
 @app.post('/sair')
 async def logout(req:Request,csrf:str=Form(...)):
     csrf_check(req,csrf); SESSIONS.pop(req.session.get('sid'),None);req.session.clear()
-    return RedirectResponse('/',status_code=303)
+    return RedirectResponse('/admin',status_code=303)
 
 @app.post('/minha-senha')
 async def own_password(req:Request,csrf:str=Form(...),password:str=Form(...)):
@@ -141,7 +154,7 @@ async def own_password(req:Request,csrf:str=Form(...),password:str=Form(...)):
     await request_api('PUT','/auth/v1/user',token=session_token(req),json={'password':password})
     await request_api('PATCH','/rest/v1/profiles',admin=True,params={'id':'eq.'+user['id']},json={'must_change_password':False})
     SESSIONS.pop(req.session.get('sid'),None);req.session.clear()
-    return page(req,'<section><h2>Senha atualizada</h2><p>Entre novamente com sua nova senha.</p><a href="/">Entrar</a></section>')
+    return page(req,'<section><h2>Senha atualizada</h2><p>Entre novamente com sua nova senha.</p><a href="/admin">Entrar</a></section>')
 
 @app.get('/recuperar')
 async def recover_form(req:Request):
@@ -174,8 +187,7 @@ async def reset_password(req:Request,csrf:str=Form(...),access_token:str=Form(..
 @app.post('/formatar')
 async def formatar(req:Request,csrf:str=Form(...),texto:str=Form(''),arquivo:UploadFile|None=File(None)):
     csrf_check(req,csrf)
-    user,profile=await current(req)
-    if profile['must_change_password']: raise HTTPException(403,'Altere sua senha temporária antes de gerar documentos')
+    public_limit(req)
     has_file=bool(arquivo and arquivo.filename)
     if has_file == bool(texto.strip()): raise HTTPException(400,'Envie um arquivo OU cole um texto')
     if has_file:
@@ -191,77 +203,8 @@ async def formatar(req:Request,csrf:str=Form(...),texto:str=Form(''),arquivo:Upl
         output=format_docx(source,await template_bytes())
     except HTTPException: raise
     except Exception: raise HTTPException(422,'Documento inválido ou incompatível')
-    doc_id=str(uuid.uuid4()); path=f'{user["id"]}/{doc_id}.docx'
-    await request_api('POST','/storage/v1/object/peticoes/'+path,admin=True,data=output,headers={'Content-Type':MIME,'x-upsert':'false'},expected=(200,201))
-    try:
-        await request_api('POST','/rest/v1/documents',admin=True,json={'id':doc_id,'user_id':user['id'],'original_filename':arquivo.filename if has_file else None,'output_filename':'peticao_formatada.docx','storage_path':path},headers={'Prefer':'return=minimal'},expected=(201,))
-    except HTTPException:
-        try: await request_api('DELETE','/storage/v1/object/peticoes/'+path,admin=True)
-        except HTTPException: pass
-        raise
+    # Não armazenar arquivo, texto ou documento resultante no Supabase.
     return file_response(output)
-
-async def doc_for(req,doc_id):
-    user,_=await current(req)
-    r=await request_api('GET','/rest/v1/documents',admin=True,params={'id':'eq.'+str(doc_id),'user_id':'eq.'+user['id'],'select':'id,storage_path'})
-    rows=r.json()
-    if not rows: raise HTTPException(404,'Documento não encontrado')
-    path=rows[0]['storage_path']
-    if not path.startswith(user['id']+'/'): raise HTTPException(403,'Caminho inválido')
-    return path
-
-@app.get('/documentos/{doc_id}')
-async def download(req:Request,doc_id:uuid.UUID):
-    path=await doc_for(req,doc_id)
-    r=await request_api('GET','/storage/v1/object/peticoes/'+path,admin=True)
-    return file_response(r.content)
-
-@app.post('/documentos/{doc_id}/excluir')
-async def delete_doc(req:Request,doc_id:uuid.UUID,csrf:str=Form(...)):
-    csrf_check(req,csrf)
-    path=await doc_for(req,doc_id)
-    await request_api('DELETE','/storage/v1/object/peticoes/'+path,admin=True)
-    await request_api('DELETE','/rest/v1/documents',admin=True,params={'id':'eq.'+str(doc_id)},expected=(204,))
-    return RedirectResponse('/',status_code=303)
-
-@app.post('/admin/criar')
-async def create_user(req:Request,csrf:str=Form(...),name:str=Form(...),email:str=Form(...),role:str=Form(...)):
-    csrf_check(req,csrf); await require_admin(req)
-    name=name.strip();email=email.strip().lower()
-    if not (1<=len(name)<=120) or role not in ('admin','collaborator') or not re.fullmatch(r'[^\s@]+@[^\s@]+\.[^\s@]+',email):
-        raise HTTPException(400,'Dados inválidos')
-    temp=secrets.token_urlsafe(24)
-    r=await request_api('POST','/auth/v1/admin/users',admin=True,json={'email':email,'password':temp,'email_confirm':True},expected=(200,201))
-    uid=r.json()['id']
-    try:
-        await request_api('POST','/rest/v1/profiles',admin=True,json={'id':uid,'full_name':name,'role':role,'active':True,'must_change_password':True},expected=(201,))
-    except HTTPException:
-        # Não deixar usuário sem perfil, se o cadastro do perfil falhar.
-        try: await request_api('DELETE','/auth/v1/admin/users/'+uid,admin=True,expected=(200,204))
-        except HTTPException: pass
-        raise
-    return page(req,f'<section><h2>Usuário criado</h2><p>E-mail: {esc(email)}</p><p>Senha temporária (exibida somente agora): <code>{esc(temp)}</code></p><p>Transmita a senha ao colaborador por canal seguro. Será necessário alterá-la no primeiro acesso.</p><a href="/">Voltar</a></section>')
-
-@app.post('/admin/status')
-async def set_status(req:Request,csrf:str=Form(...),uid:str=Form(...),active:str=Form(...)):
-    csrf_check(req,csrf); user=await require_admin(req)
-    try: uid=str(uuid.UUID(uid))
-    except ValueError: raise HTTPException(400,'UID inválido')
-    if uid==user['id']: raise HTTPException(400,'Não é possível desativar a própria conta')
-    desired=active=='true'
-    await request_api('PATCH','/rest/v1/profiles',admin=True,params={'id':'eq.'+uid},json={'active':desired},expected=(204,))
-    return RedirectResponse('/',status_code=303)
-
-@app.post('/admin/senha')
-async def reset_admin(req:Request,csrf:str=Form(...),uid:str=Form(...)):
-    csrf_check(req,csrf); user=await require_admin(req)
-    try: uid=str(uuid.UUID(uid))
-    except ValueError: raise HTTPException(400,'UID inválido')
-    if uid==user['id']: raise HTTPException(400,'Use Alterar minha senha')
-    temp=secrets.token_urlsafe(24)
-    await request_api('PUT','/auth/v1/admin/users/'+uid,admin=True,json={'password':temp},expected=(200,))
-    await request_api('PATCH','/rest/v1/profiles',admin=True,params={'id':'eq.'+uid},json={'must_change_password':True},expected=(204,))
-    return page(req,f'<section><h2>Senha temporária</h2><p>Nova senha (exibida somente agora): <code>{esc(temp)}</code></p><p>Envie por canal seguro. O usuário deverá alterá-la ao entrar.</p><a href="/">Voltar</a></section>')
 
 @app.post('/admin/timbrado')
 async def update_template(req:Request,csrf:str=Form(...),arquivo:UploadFile=File(...)):
@@ -276,4 +219,4 @@ async def update_template(req:Request,csrf:str=Form(...),arquivo:UploadFile=File
     path='templates/'+str(uuid.uuid4())+'.docx'
     await request_api('POST','/storage/v1/object/peticoes/'+path,admin=True,data=content,headers={'Content-Type':MIME,'x-upsert':'false'},expected=(200,201))
     await request_api('POST','/rest/v1/app_settings',admin=True,json={'id':1,'template_path':path},headers={'Prefer':'resolution=merge-duplicates,return=minimal'},expected=(201,))
-    return RedirectResponse('/',status_code=303)
+    return RedirectResponse('/admin',status_code=303)
